@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.build.json",
+  "compilerOptions": {
+    "outDir": "./dist/",
+    "rootDir": "./src/",
+    "declaration": true,
+    "jsx": "react",
+    "lib": ["es2017", "DOM"]
+  },
+  "include": ["./**/*.ts", "./**/*.tsx"],
+  "exclude": ["./src/tests/**/*", "./vite.config.ts"]
+}

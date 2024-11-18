@@ -1,0 +1,390 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build-cli:
+    name: Build compiler
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        target:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            build-name: isograph_cli
+            artifact-name: isograph_cli-linux-x64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            build-name: isograph_cli
+            artifact-name: isograph_cli-bin-linux-arm64
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            build-name: isograph_cli
+            artifact-name: isograph_cli-macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            build-name: isograph_cli
+            artifact-name: isograph_cli-macos-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            longpaths: true
+            build-name: isograph_cli.exe
+            artifact-name: isograph_cli-bin-win-x64
+    runs-on: ${{ matrix.target.os }}
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.75.0
+          override: true
+          target: ${{ matrix.target.target }}
+      # more info here:- https://github.com/rust-lang/cargo/issues/13020
+      - name: Enable longer pathnames for git
+        if: matrix.target.longpaths
+        run: git config --system core.longpaths true
+      - name: Install cross
+        if: matrix.target.cross
+        uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: cross
+      - name: 'Build isograph_cli with cargo (${{matrix.target.target}})'
+        run: ${{ matrix.target.cross && 'cross' || 'cargo' }} build --target ${{ matrix.target.target }} --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target.artifact-name }}
+          path: target/${{ matrix.target.target }}/release/${{ matrix.target.build-name }}
+          if-no-files-found: error
+
+  build-demos:
+    name: Build demos
+    runs-on: ubuntu-latest
+    needs: [build-cli]
+    strategy:
+      matrix:
+        target:
+          - folder: github-demo
+          - folder: pet-demo
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.75.0
+          override: true
+          target: x86_64-apple-darwin
+      - name: 'Download cli binary'
+        uses: actions/download-artifact@v4
+        with:
+          name: isograph_cli-linux-x64
+          path: artifacts/linux-x64
+      - name: Make artifact executable
+        run: chmod +x ./artifacts/linux-x64/isograph_cli
+      - name: 'Build project'
+        run: ./artifacts/linux-x64/isograph_cli --config ./demos/${{ matrix.target.folder }}/isograph.config.json
+      - name: 'Check working directory status'
+        run: './scripts/check-git-status.sh'
+
+  typecheck-demos:
+    name: Typecheck and Lint Demos
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - folder: github-demo
+          - folder: pet-demo
+    steps:
+      - uses: actions/checkout@v2
+      - uses: pnpm/action-setup@v2
+      - name: Use Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: 22
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      # TODO reuse some artifacts or something, we're doing this in multiple steps
+      - name: Build JS files
+        run: pnpm -r compile
+      - name: Typecheck
+        run: cd ./demos/${{ matrix.target.folder }} && pnpm tsc
+      - name: Lint
+        run: cd ./demos/${{ matrix.target.folder }} && pnpm lint
+
+  build-js-packages:
+    name: Build js packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: pnpm/action-setup@v2
+      - name: Use Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: 22
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build
+        run: pnpm -r compile
+      - name: Run unit tests
+        # Note: unit tests have to run after building, because the unit tests
+        # rely on Isograph, which relies on @isograph/react being a valid input
+        #
+        # This can be overcome, if necessary, e.g. if "@isograph/react" was a
+        # parameter passed to the CLI.
+        run: pnpm -r test
+
+  build-website:
+    name: Build website
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./docs-website
+    steps:
+      - uses: actions/checkout@v3
+      - uses: pnpm/action-setup@v2
+      - name: Use Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: 22
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build website
+        run: pnpm build
+      - name: Upload artifact
+        id: upload-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docusaurus-build
+          # upload-artifact ignores working-directory, seemingly, though
+          # the docs indicate otherwise.
+          path: docs-website/build/
+          retention-days: 1
+          if-no-files-found: error
+
+  prettier:
+    name: Run prettier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: pnpm/action-setup@v2
+      - name: Use Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: 22
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Run prettier
+        run: pnpm run format-prettier
+      - name: 'Check working directory status'
+        run: './scripts/check-git-status.sh'
+
+  rustfmt:
+    name: Run cargo fmt and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: rustfmt
+      - name: Run cargo fmt
+        run: cargo fmt
+      - name: Run cargo clippy
+        run: cargo clippy
+      - name: 'Check working directory status'
+        run: './scripts/check-git-status.sh'
+
+  cargo-test:
+    name: Run cargo test (excluding relay tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: rustfmt
+      - name: Run cargo test
+        run: cargo test
+
+  all-checks-passed:
+    name: All checks passed
+    runs-on: ubuntu-latest
+    needs:
+      [
+        build-js-packages,
+        build-cli,
+        build-demos,
+        build-website,
+        prettier,
+        rustfmt,
+        cargo-test,
+        typecheck-demos,
+      ]
+    steps:
+      - name: Do nothing
+        run: echo Isograph is awesome!
+
+  deploy-website:
+    name: Deploy website
+    runs-on: ubuntu-latest
+    needs: [all-checks-passed]
+    if: github.event_name == 'push' && github.repository == 'isographlabs/isograph' && github.ref == 'refs/heads/main' || github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    defaults:
+      run:
+        working-directory: ./docs-website
+    steps:
+      - uses: actions/checkout@v3
+      - uses: pnpm/action-setup@v2
+      - name: Use Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: 22
+          cache: 'pnpm'
+      - name: 'Download build folder'
+        uses: actions/download-artifact@v4
+        with:
+          name: docusaurus-build
+          path: docs-website/build
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+      - name: Upload custom
+        run: tar --dereference --hard-dereference --directory "build" -cvf "$RUNNER_TEMP/artifact.tar" --exclude=.git --exclude =.github .
+      - name: Upload artifact
+        id: upload-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  main-release:
+    name: Release packages to NPM
+    runs-on: macos-latest
+    if: github.event_name == 'push' && github.repository == 'isographlabs/isograph' && github.ref == 'refs/heads/main' || github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [all-checks-passed]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: pnpm/action-setup@v2
+      - uses: actions/setup-node@v2
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Change package versions to commit
+        run: pnpm gulp setMainVersion
+        env:
+          RELEASE_COMMIT_SHA: ${{ github.sha }}
+      # TODO reuse this somehow?
+      - name: Build
+        run: pnpm -r compile
+      - name: Download artifact isograph_cli-linux-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: isograph_cli-linux-x64
+          path: libs/isograph-compiler/artifacts/linux-x64
+      - name: Download artifact isograph_cli-bin-linux-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: isograph_cli-bin-linux-arm64
+          path: libs/isograph-compiler/artifacts/linux-arm64
+      - name: Download artifact isograph_cli-macos-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: isograph_cli-macos-x64
+          path: libs/isograph-compiler/artifacts/macos-x64
+      - name: Download artifact isograph_cli-macos-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: isograph_cli-macos-arm64
+          path: libs/isograph-compiler/artifacts/macos-arm64
+      - name: Mark binaries as executable
+        run: |
+          chmod +x libs/isograph-compiler/artifacts/linux-x64/isograph_cli
+          chmod +x libs/isograph-compiler/artifacts/linux-arm64/isograph_cli
+          chmod +x libs/isograph-compiler/artifacts/macos-x64/isograph_cli
+          chmod +x libs/isograph-compiler/artifacts/macos-arm64/isograph_cli
+      - name: Publish to NPM
+        run: |
+          for pkg in libs/*; do
+            echo PUBLISHING $pkg
+            cd $pkg
+            npm publish --tag main
+            cd ../..
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+
+  versioned-release:
+    name: Release packages to NPM (latest)
+    runs-on: macos-latest
+    if: github.event_name == 'push' && github.repository == 'isographlabs/isograph' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [all-checks-passed]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: pnpm/action-setup@v2
+      - uses: actions/setup-node@v2
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      # - name: Change package versions to commit
+      #   run: pnpm gulp setMainVersion
+      #   # TODO do this less hackily
+      - name: Build
+        run: pnpm -r compile
+      - name: Download artifact isograph_cli-linux-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: isograph_cli-linux-x64
+          path: libs/isograph-compiler/artifacts/linux-x64
+      - name: Download artifact isograph_cli-bin-linux-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: isograph_cli-bin-linux-arm64
+          path: libs/isograph-compiler/artifacts/linux-arm64
+      - name: Download artifact isograph_cli-macos-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: isograph_cli-macos-x64
+          path: libs/isograph-compiler/artifacts/macos-x64
+      - name: Download artifact isograph_cli-macos-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: isograph_cli-macos-arm64
+          path: libs/isograph-compiler/artifacts/macos-arm64
+      - name: Mark binaries as executable
+        run: |
+          chmod +x libs/isograph-compiler/artifacts/linux-x64/isograph_cli
+          chmod +x libs/isograph-compiler/artifacts/linux-arm64/isograph_cli
+          chmod +x libs/isograph-compiler/artifacts/macos-x64/isograph_cli
+          chmod +x libs/isograph-compiler/artifacts/macos-arm64/isograph_cli
+      - name: Publish latest version to NPM
+        run: |
+          for pkg in libs/*; do
+            echo PUBLISHING $pkg
+            cd $pkg
+            npm publish --tag latest
+            cd ../..
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}

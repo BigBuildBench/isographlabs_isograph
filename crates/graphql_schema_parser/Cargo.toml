@@ -1,0 +1,7 @@
+[package]
+name = "graphql_schema_parser"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
